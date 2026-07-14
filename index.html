@@ -1,1 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!-- viewport tag = scales the page correctly on iPhone AND iPad.
+     viewport-fit=cover lets the page extend into the notch area
+     (we then pad it back with safe-area insets in the CSS below) -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- iOS treats the page more like an app: no gray tap-flash chrome,
+     dark status bar to match the theme -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101418">
+<title>PowelPal</title>
+<style>
+/* ============================================================
+   STYLE — instrument-cluster look. Dark like a dashboard at
+   night, voltage digits in a monospace "multimeter LCD" face.
+   Verdict colors follow the gauge bands.
+   ============================================================ */
+:root{
+  --bg:#101418;          /* dashboard black-blue */
+  --panel:#1a2027;       /* card surface */
+  --panel-edge:#2a323c;  /* card border */
+  --text:#e8ecf1;        /* main text */
+  --dim:#8a95a3;         /* secondary text */
+  --good:#37c871;        /* >=12.6V */
+  --okay:#e8c547;        /* >=12.35V */
+  --low:#f08c3a;         /* >=12.0V */
+  --weak:#e5484d;        /* <12.0V */
+  --run:#4da3ff;         /* >13.2V = engine running/charging */
+  --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,'Segoe UI',Roboto,sans-serif;
+  min-height:100vh;max-width:560px;margin:0 auto;
+  /* safe-area insets: keeps content out of the iPhone notch and
+     home-indicator bar; max() falls back to 16px on devices
+     without a notch (iPads, older iPhones) */
+  padding:max(16px, env(safe-area-inset-top))
+          max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom))
+          max(16px, env(safe-area-inset-left));
+  -webkit-tap-highlight-color:transparent; /* no gray flash on tap */
+}
+header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+h1{font-size:22px;letter-spacing:.5px}
+h1 span{color:var(--run)}
+#status{font-size:13px;color:var(--dim)}
+#status.on{color:var(--good)}
+.card{
+  background:var(--panel);border:1px solid var(--panel-edge);
+  border-radius:14px;padding:16px;margin-bottom:14px;
+}
+/* --- gauge card --- */
+#gaugeCard{text-align:center}
+#gauge{width:100%;max-width:340px;height:auto}
+/* clamp() = fluid sizing: never smaller than 32px (iPhone SE),
+   scales with screen width, never bigger than 44px (iPad) */
+#bigVolts{font-family:var(--mono);font-size:clamp(32px, 10vw, 44px);
+  font-weight:600;line-height:1}
+#bigVerdict{font-size:15px;font-weight:600;letter-spacing:2px;margin-top:4px}
+#gaugeNote{font-size:12px;color:var(--dim);margin-top:6px}
+/* --- buttons --- */
+.btnRow{display:flex;gap:10px;flex-wrap:wrap}
+button{
+  flex:1;min-width:130px;min-height:48px; /* 48px = comfortable thumb
+                                             target on a phone */
+  padding:12px 10px;border:0;border-radius:10px;
+  font-size:15px;font-weight:600;color:#0d1013;background:var(--run);
+  cursor:pointer;
+  touch-action:manipulation; /* kills iOS double-tap-to-zoom delay
+                                so buttons respond instantly */
+}
+/* On narrow phones the three buttons don't fit side by side —
+   let Connect take a full row and the two data buttons share one */
+@media (max-width:420px){
+  #btnConnect{flex-basis:100%}
+}
+button.secondary{background:var(--panel-edge);color:var(--text)}
+button:disabled{opacity:.35}
+/* --- history --- */
+#history h2{font-size:14px;color:var(--dim);text-transform:uppercase;
+  letter-spacing:1.5px;margin-bottom:10px}
+.rec{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 4px;border-bottom:1px solid var(--panel-edge);
+}
+.rec:last-child{border-bottom:0}
+.dot{width:12px;height:12px;border-radius:50%;flex:none}
+.rec .v{font-family:var(--mono);font-size:18px;width:78px}
+.rec .verd{font-size:13px;font-weight:600;width:56px;letter-spacing:1px}
+.rec .meta{font-size:12px;color:var(--dim);margin-left:auto;text-align:right}
+#empty{color:var(--dim);font-size:14px;text-align:center;padding:18px 0}
+#log{font-family:var(--mono);font-size:11px;color:var(--dim);
+  max-height:110px;overflow-y:auto;white-space:pre-wrap}
+.danger{color:var(--weak);background:none;border:1px solid var(--weak);
+  font-size:12px;padding:8px;margin-top:10px;width:100%}
+/* alert banner: hidden by default, slides in red/orange when a
+   bad reading arrives while the app is open */
+#alertBanner{display:none;border-radius:12px;padding:14px 16px;
+  margin-bottom:14px;font-weight:600;font-size:15px;text-align:center}
+#alertBanner.show{display:block;animation:pulse 1s ease-in-out 3}
+#alertBanner.weak{background:var(--weak);color:#fff}
+#alertBanner.low{background:var(--low);color:#0d1013}
+@keyframes pulse{50%{opacity:.55}}
+</style>
+</head>
+<body>
 
+<header>
+  <h1>Powel<span>Pal</span></h1>
+  <div id="status">Not connected</div>
+</header>
+
+<!-- ===== ALERT BANNER: appears when a bad reading comes in ===== -->
+<div id="alertBanner"></div>
+
+<!-- ===== GAUGE: latest known reading, styled like a voltmeter ===== -->
+<div class="card" id="gaugeCard">
+  <svg id="gauge" viewBox="0 0 300 175"></svg>
+  <div id="bigVolts">--.--</div>
+  <div id="bigVerdict" style="color:var(--dim)">NO DATA YET</div>
+  <div id="gaugeNote"></div>
+</div>
+
+<!-- ===== ACTION BUTTONS ===== -->
+<div class="card">
+  <div class="btnRow">
+    <button id="btnConnect">Connect</button>
+    <button id="btnSync" disabled>Get My Data</button>
+    <button id="btnLive" class="secondary" disabled>Live Reading</button>
+  </div>
+</div>
+
+<!-- ===== HISTORY LIST (from IndexedDB, survives closing the app) ===== -->
+<div class="card" id="history">
+  <h2>History</h2>
+  <div id="recList"><div id="empty">No readings saved yet. Connect and tap "Get My Data".</div></div>
+  <button class="danger" id="btnClear">Erase saved history (this device only)</button>
+</div>
+
+<!-- ===== RAW LOG: everything the Arduino says, for debugging ===== -->
+<div class="card">
+  <h2 style="font-size:14px;color:var(--dim);letter-spacing:1.5px;
+    text-transform:uppercase;margin-bottom:8px">Connection log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+/* ############################################################
+   POWELPAL APP — every function explained.
+   Big picture: 4 layers, top to bottom in this file:
+     1. CONSTANTS       — the "contract" shared with the Arduino
+     2. DATABASE layer  — IndexedDB: permanent storage on the iPad
+     3. BLUETOOTH layer — Web Bluetooth: talk to the HM-10
+     4. UI layer        — gauge, history list, status text
+   ############################################################ */
+
+/* ============================================================
+   1. CONSTANTS — must match the Arduino sketch exactly
+   ============================================================ */
+const BLE_SERVICE = 0xFFE0;   // HM-10's one custom service
+const BLE_CHAR    = 0xFFE1;   // its one characteristic: we WRITE commands
+                              // to it and RECEIVE notifications from it
+const CMD_GET  = 'G';         // ask Arduino to dump stored readings
+const CMD_ACK  = 'K';         // "I saved everything — you may wipe EEPROM"
+const CMD_LIVE = 'C';         // ask for one live reading right now
+const SYNC_TIMEOUT_MS = 8000; // if END never arrives, give up after 8s
+
+// Verdict lookup: color + what to tell the user. Keys match the
+// exact strings the Arduino sends.
+const VERDICTS = {
+  GOOD:{color:'var(--good)', label:'GOOD',  note:'Battery healthy'},
+  OKAY:{color:'var(--okay)', label:'OKAY',  note:'Charge is acceptable'},
+  LOW :{color:'var(--low)',  label:'LOW',   note:'Charge is getting low'},
+  WEAK:{color:'var(--weak)', label:'WEAK',  note:'Battery needs attention'},
+  RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'}
+};
+
+/* ============================================================
+   2. DATABASE LAYER — IndexedDB
+   Why IndexedDB: it's the browser's built-in permanent database.
+   Data saved here survives closing Bluefy, restarting the iPad,
+   everything — until the user erases it. (This is why the
+   Arduino is allowed to wipe its EEPROM after we confirm.)
+   ============================================================ */
+let db = null;  // the open database handle, set once by openDB()
+
+/* openDB()
+   Opens (or creates, on first run) the "powelpal" database with
+   one table ("readings"). IndexedDB is callback-based, so this
+   wraps it in a Promise so the rest of the code can just
+   `await openDB()`. Runs once at startup. */
+function openDB(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('powelpal', 1);      // name, version
+    req.onupgradeneeded = () => {                   // first run only:
+      // create the table; autoIncrement gives every reading its
+      // own unique id automatically
+      req.result.createObjectStore('readings', {keyPath:'id', autoIncrement:true});
+    };
+    req.onsuccess = () => { db = req.result; resolve(); };
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+/* saveRecords(records)
+   Takes an array of parsed reading objects and writes them all
+   into the database inside ONE transaction — meaning either all
+   of them save or none do (no half-saved syncs). Resolves only
+   when the transaction fully commits; this is the "confirmed
+   saved" moment that gates sending 'K' to the Arduino. */
+function saveRecords(records){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('readings', 'readwrite'); // open write txn
+    const store = tx.objectStore('readings');
+    records.forEach(r => store.add(r));   // queue every record
+    tx.oncomplete = resolve;              // ALL writes committed to disk
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* loadRecords()
+   Reads every saved reading back out of the database, for the
+   history list. Returns an array (possibly empty). */
+function loadRecords(){
+  return new Promise((resolve, reject) => {
+    const req = db.transaction('readings').objectStore('readings').getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+
+/* clearHistory()
+   Erases THIS device's database (NOT the Arduino — that wipes
+   itself only after a confirmed sync). Asks first, because this
+   is the permanent copy on this phone/tablet. */
+async function clearHistory(){
+  if(!confirm('Erase all saved readings from this device?')) return;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('readings', 'readwrite');
+    tx.objectStore('readings').clear();     // delete every row
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  render();                                 // refresh the empty list
+}
+
+/* ============================================================
+   3. BLUETOOTH LAYER — Web Bluetooth to the HM-10
+   Flow: connect() once -> notifications stream in as 20-byte
+   chunks -> onNotify() glues chunks into lines -> handleLine()
+   decides what each line means.
+   ============================================================ */
+let bleChar   = null;   // the FFE1 characteristic once connected
+let rxBuffer  = '';     // text glue-buffer for chunk reassembly
+let syncState = 'idle'; // 'idle' | 'receiving' | 'wiping' — tiny state machine
+let syncRecords = [];   // records collected during the current sync
+let syncTimer = null;   // timeout handle so a dead sync can't hang forever
+
+/* connect()
+   Runs when "Connect" is tapped. (Web Bluetooth REQUIRES a user
+   tap — pages can't scan for devices on their own.) Walks the
+   BLE ladder: pick device -> connect -> find service FFE0 ->
+   find characteristic FFE1 -> subscribe to notifications.
+   After this, every line the Arduino prints arrives at onNotify(). */
+async function connect(){
+  try{
+    setStatus('Choosing device…', false);
+    // Opens Bluefy's device picker, filtered to devices that
+    // advertise the HM-10 service (yours shows up as HMSoft
+    // unless renamed with AT+NAME):
+    const device = await navigator.bluetooth.requestDevice({
+      filters:[{services:[BLE_SERVICE]}]
+    });
+    // If the module resets or drives away, fall back gracefully:
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+
+    setStatus('Connecting…', false);
+    const server  = await device.gatt.connect();            // link up
+    const service = await server.getPrimaryService(BLE_SERVICE);
+    bleChar       = await service.getCharacteristic(BLE_CHAR);
+
+    // Subscribe: from now on the HM-10 pushes data to us
+    await bleChar.startNotifications();
+    bleChar.addEventListener('characteristicvaluechanged', onNotify);
+
+    setStatus('Connected', true);
+    btnSync.disabled = false;   // now the data buttons make sense
+    btnLive.disabled = false;
+    logLine('[connected]');
+  }catch(err){
+    // User cancelled the picker, or connection failed
+    setStatus('Not connected', false);
+    logLine('[connect failed: ' + err.message + ']');
+  }
+}
+
+/* onDisconnect()
+   Fires if the BLE link drops (range, power, interference).
+   Resets the UI to the safe "not connected" state. Any sync in
+   progress is abandoned — and that's FINE: the Arduino only
+   wipes after receiving 'K', so the data is still in EEPROM
+   and the next sync gets everything again. Nothing is lost. */
+function onDisconnect(){
+  bleChar = null;
+  syncState = 'idle';
+  clearTimeout(syncTimer);
+  btnSync.disabled = true;
+  btnLive.disabled = true;
+  setStatus('Disconnected', false);
+  logLine('[disconnected]');
+}
+
+/* sendCmd(char)
+   Sends one command character ('G'/'K'/'C') to the Arduino.
+   BLE moves raw bytes, not strings, so TextEncoder converts.
+   Tries write-without-response first (what the HM-10 prefers);
+   falls back to a normal write if Bluefy/firmware disagrees. */
+async function sendCmd(c){
+  const bytes = new TextEncoder().encode(c);   // 'G' -> Uint8Array [71]
+  try{ await bleChar.writeValueWithoutResponse(bytes); }
+  catch{ await bleChar.writeValue(bytes); }    // fallback path
+  logLine('> ' + c);
+}
+
+/* onNotify(event)
+   THE CHUNK REASSEMBLER — the most important plumbing here.
+   The HM-10 delivers at most 20 bytes per notification, so one
+   line from the Arduino ("BEGIN\r\n7,3,12.55,GOOD\r\n") can be
+   split anywhere. Strategy: decode each chunk to text, append
+   to a running buffer, and only act when a '\n' proves a line
+   is complete. Leftover partial text stays in the buffer for
+   the next chunk. */
+function onNotify(event){
+  rxBuffer += new TextDecoder().decode(event.target.value); // bytes->text, append
+  let nl;
+  while((nl = rxBuffer.indexOf('\n')) >= 0){       // full line available?
+    const line = rxBuffer.slice(0, nl).replace('\r','').trim(); // take it, drop \r
+    rxBuffer = rxBuffer.slice(nl + 1);             // keep the remainder
+    if(line) handleLine(line);                     // process non-empty lines
+  }
+}
+
+/* handleLine(line)
+   The protocol brain. Gets one complete line from the Arduino
+   and routes it based on what it is and what state we're in:
+     BEGIN        -> a dump is starting: reset the collection bin
+     b,s,v,VERD   -> one stored reading: parse and collect it
+     END,n        -> dump finished: verify and save (finishSync)
+     WIPED        -> Arduino confirmed its EEPROM is cleared
+     NOW,v,VERD   -> live reading: just show it on the gauge */
+function handleLine(line){
+  logLine('< ' + line);
+
+  if(line === 'BEGIN'){
+    syncState = 'receiving';
+    syncRecords = [];                      // empty the bin
+    // safety net: if END never shows up, unstick ourselves
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      if(syncState === 'receiving'){
+        syncState = 'idle';
+        setStatus('Sync timed out — try again', true);
+      }
+    }, SYNC_TIMEOUT_MS);
+    return;
+  }
+
+  if(line.startsWith('END,')){
+    clearTimeout(syncTimer);
+    const claimed = parseInt(line.slice(4), 10); // Arduino says it sent n
+    finishSync(claimed);                         // verify + save + ack
+    return;
+  }
+
+  if(line === 'WIPED'){
+    syncState = 'idle';
+    setStatus('Synced ✓ (Arduino cleared)', true);
+    return;
+  }
+
+  if(line.startsWith('NOW,')){
+    // live reading: "NOW,13.87,RUN" -> just drive the gauge
+    const [, v, verd] = line.split(',');
+    showReading(parseFloat(v), verd, 'Live reading — just now');
+    return;
+  }
+
+  if(syncState === 'receiving'){
+    // stored record: "boot,sec,volts,VERDICT"
+    const p = line.split(',');
+    if(p.length === 4){
+      syncRecords.push({
+        boot:    parseInt(p[0], 10),   // which drive (power-cycle #)
+        sec:     parseInt(p[1], 10),   // seconds into that drive
+        volts:   parseFloat(p[2]),     // e.g. 12.55
+        verdict: p[3],                 // "GOOD" etc.
+        // The iPad's clock stamps WHEN WE RECEIVED it. Honest label
+        // matters: for readings from older drives this is the sync
+        // time, not the drive time (the Arduino has no clock).
+        syncedAt: Date.now()
+      });
+    }
+  }
+}
+
+/* finishSync(claimedCount)
+   The integrity gate. Compares how many records we actually
+   parsed against the count in the END line. Only if they match:
+   save all to IndexedDB, WAIT for the save to truly commit, and
+   only THEN send 'K' so the Arduino wipes. This ordering is the
+   whole point of the store-and-forward design — the EEPROM copy
+   is never destroyed until the iPad copy provably exists. */
+async function finishSync(claimedCount){
+  syncState = 'idle';
+  if(syncRecords.length !== claimedCount){
+    // A chunk got lost. Don't ack — Arduino keeps its data, retry.
+    setStatus(`Got ${syncRecords.length}/${claimedCount} — retry`, true);
+    return;
+  }
+  if(claimedCount === 0){
+    setStatus('No new readings on device', true);
+    return;
+  }
+  await saveRecords(syncRecords);   // <-- resolves only after disk commit
+  syncState = 'wiping';
+  await sendCmd(CMD_ACK);           // now (and only now) allow the wipe
+  await render();                   // show the new history
+  const newest = syncRecords[syncRecords.length - 1];
+  showReading(newest.volts, newest.verdict,
+              `Newest of ${claimedCount} synced reading(s)`);
+}
+
+/* ============================================================
+   4. UI LAYER
+   ============================================================ */
+
+/* setStatus(text, connectedLook)
+   Updates the little status text top-right; green when good. */
+function setStatus(text, ok){
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = ok ? 'on' : '';
+}
+
+/* logLine(text)
+   Appends one line to the raw connection log card — every byte
+   in and out. Invaluable when BLE misbehaves at the Expo. */
+function logLine(t){
+  const el = document.getElementById('log');
+  el.textContent += t + '\n';
+  el.scrollTop = el.scrollHeight;   // keep newest line visible
+}
+
+/* voltsToAngle(v)
+   Math helper for the gauge: maps 11.5V–15V onto the needle's
+   sweep, -90° (far left) to +90° (far right). Clamped so a
+   crazy value can't spin the needle off the dial. */
+function voltsToAngle(v){
+  const min = 11.5, max = 15.0;
+  const t = Math.min(1, Math.max(0, (v - min) / (max - min))); // 0..1
+  return -90 + t * 180;                                        // -90..+90
+}
+
+/* drawGauge(volts)
+   Builds the SVG voltmeter: colored arc bands for each verdict
+   zone (weak/low/okay/good/charging), tick labels, and a needle
+   rotated to the current voltage. Redrawn from scratch each
+   time — at this size that's simpler and plenty fast. */
+function drawGauge(volts){
+  const cx=150, cy=150, r=115;      // center + radius of the dial
+  // Each verdict zone as [fromVolts, toVolts, color]:
+  const bands = [
+    [11.5, 12.0, 'var(--weak)'],
+    [12.0, 12.35,'var(--low)'],
+    [12.35,12.6, 'var(--okay)'],
+    [12.6, 13.2, 'var(--good)'],
+    [13.2, 15.0, 'var(--run)']
+  ];
+  // xy(angle, radius): converts a needle angle (-90..+90, left to
+  // right across the dial) into an x,y point on the dial. Standard
+  // "point on a circle" trig, used for arcs, ticks, and the needle.
+  const xy = (angDeg, rad=r) => {
+    const a = (180 - (angDeg + 90)) * Math.PI / 180; // -90..90 -> 180..0
+    return [cx + rad * Math.cos(a), cy - rad * Math.sin(a)];
+  };
+  let svg = '';
+  for(const [v1, v2, color] of bands){
+    const [x1, y1] = xy(voltsToAngle(v1));
+    const [x2, y2] = xy(voltsToAngle(v2));
+    svg += `<path d="M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}"
+            stroke="${color}" stroke-width="14" fill="none"
+            stroke-linecap="butt" opacity="0.9"/>`;
+  }
+  // Tick labels at the key thresholds:
+  for(const v of [11.5, 12, 12.6, 13.2, 15]){
+    const [tx, ty] = xy(voltsToAngle(v), r - 26);
+    svg += `<text x="${tx}" y="${ty}" fill="var(--dim)" font-size="11"
+            text-anchor="middle" font-family="var(--mono)">${v}</text>`;
+  }
+  // Needle (only if we have a reading):
+  if(volts !== null){
+    const [nx, ny] = xy(voltsToAngle(volts), r - 12);
+    svg += `<line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}"
+            stroke="var(--text)" stroke-width="3" stroke-linecap="round"/>
+            <circle cx="${cx}" cy="${cy}" r="6" fill="var(--text)"/>`;
+  }
+  document.getElementById('gauge').innerHTML = svg;
+}
+
+/* beep(times)
+   Plays short warning tones through the phone's speaker using
+   the Web Audio API (no sound file needed). iOS only allows
+   audio that follows a user tap — which is fine here, because
+   alerts always come right after tapping Get My Data or Live
+   Reading, so we're inside that allowed window. */
+function beep(times){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    let t = ctx.currentTime;
+    for(let i = 0; i < times; i++){
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.frequency.value = 1000;          // 1kHz tone
+      osc.connect(gain); gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(0.2, t);    // modest volume
+      osc.start(t); osc.stop(t + 0.15);    // 150ms beep
+      t += 0.3;                            // spaced 300ms apart
+    }
+  }catch(e){ /* audio blocked — banner still shows, no crash */ }
+}
+
+/* checkAlert(verdict)
+   The phone-side "battery is bad" alert. Shows the red/orange
+   banner and beeps when a WEAK or LOW reading arrives. Only
+   works while the app is OPEN — iOS web pages can't push
+   notifications in the background, so the always-on warning
+   lives on the Arduino's piezo instead. */
+function checkAlert(verdict){
+  const b = document.getElementById('alertBanner');
+  if(verdict === 'WEAK'){
+    b.textContent = '\u26A0 Battery is WEAK — needs attention';
+    b.className = 'show weak';
+    beep(3);
+  } else if(verdict === 'LOW'){
+    b.textContent = '\u26A0 Battery charge is LOW';
+    b.className = 'show low';
+    beep(1);
+  } else {
+    b.className = '';        // healthy reading -> hide the banner
+  }
+}
+
+/* showReading(volts, verdict, note)
+   Drives the whole gauge card at once: needle, big digits,
+   colored verdict word, and the small context note underneath.
+   Also fires the bad-battery alert if the reading warrants it. */
+function showReading(volts, verdict, note){
+  const meta = VERDICTS[verdict] || {color:'var(--dim)', label:verdict, note:''};
+  drawGauge(volts);
+  document.getElementById('bigVolts').textContent = volts.toFixed(2) + ' V';
+  const bv = document.getElementById('bigVerdict');
+  bv.textContent = meta.label;
+  bv.style.color = meta.color;
+  document.getElementById('gaugeNote').textContent = note + '. ' + meta.note;
+  checkAlert(verdict);         // <-- ring the alarm if WEAK/LOW
+}
+
+/* render()
+   Rebuilds the history list from the database: newest first
+   (sorted by drive number, then seconds into the drive). Each
+   row = colored dot, volts, verdict, and when it was synced. */
+async function render(){
+  const recs = await loadRecords();
+  const list = document.getElementById('recList');
+  if(recs.length === 0){
+    list.innerHTML = '<div id="empty">No readings saved yet. Connect and tap "Get My Data".</div>';
+    return;
+  }
+  recs.sort((a, b) => (b.boot - a.boot) || (b.sec - a.sec)); // newest first
+  list.innerHTML = recs.map(r => {
+    const m = VERDICTS[r.verdict] || {color:'var(--dim)', label:r.verdict};
+    const when = new Date(r.syncedAt).toLocaleString([], {
+      month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    return `<div class="rec">
+      <div class="dot" style="background:${m.color}"></div>
+      <div class="v">${r.volts.toFixed(2)} V</div>
+      <div class="verd" style="color:${m.color}">${m.label}</div>
+      <div class="meta">drive #${r.boot}<br>synced ${when}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ============================================================
+   STARTUP — wire the buttons, open the database, draw the
+   empty gauge, load any history already on the iPad.
+   ============================================================ */
+btnConnect.onclick = connect;
+btnSync.onclick    = () => sendCmd(CMD_GET);   // 'G' -> Arduino dumps
+btnLive.onclick    = () => sendCmd(CMD_LIVE);  // 'C' -> instant reading
+btnClear.onclick   = clearHistory;
+
+// Guard rail: Web Bluetooth only exists in Bluefy on iOS (Safari
+// doesn't support it). Flag it without naming it in the status.
+if(!navigator.bluetooth){
+  setStatus('Bluetooth not supported here', false);
+  document.getElementById('btnConnect').disabled = true;
+}
+
+drawGauge(null);                 // draw the dial, no needle yet
+openDB().then(render);           // open storage, show saved history
+</script>
+</body>
+</html>
