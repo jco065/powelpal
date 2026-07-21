@@ -189,14 +189,19 @@ let rxBuffer  = '';
 let syncState = 'idle';
 let syncRecords = [];
 let syncTimer = null;
+let syncBusy  = false;   // full-sync lock: covers G, all row lines, K, WIPED
 
 /* Live mode: poll 'C' every LIVE_INTERVAL_MS until toggled off. */
 const LIVE_INTERVAL_MS = 10000;
 let liveTimer = null;
 
 function toggleLive(){
+  if(syncBusy){ logLine('[sync running — live disabled]'); return; }
   if(liveTimer){ stopLive(); return; }
-  liveTimer = setInterval(() => { if(bleChar) sendCmd(CMD_LIVE); }, LIVE_INTERVAL_MS);
+  liveTimer = setInterval(() => {
+    // extra safety: if a sync starts up mid-interval, don't fire C into it
+    if(bleChar && !syncBusy) sendCmd(CMD_LIVE);
+  }, LIVE_INTERVAL_MS);
   btnLive.textContent = 'Stop Live';
   btnLive.classList.remove('secondary');
   sendCmd(CMD_LIVE);                 // fire one right away, don't wait 10s
@@ -247,12 +252,35 @@ async function connect(){
 function onDisconnect(){
   bleChar = null;
   syncState = 'idle';
+  syncBusy = false;
   clearTimeout(syncTimer);
   if(liveTimer) stopLive();
   btnSync.disabled = true;
   btnLive.disabled = true;
   setStatus('Disconnected', false);
   logLine('[disconnected]');
+}
+
+/* Starts a sync. Refuses re-entry, kills any live polling, locks buttons. */
+async function startSync(){
+  if(syncBusy){ logLine('[sync already running]'); return; }
+  syncBusy = true;
+  if(liveTimer) stopLive();          // don't let 'C' interleave with a dump
+  btnSync.disabled = true;
+  btnLive.disabled = true;
+  await sendCmd(CMD_GET);
+}
+
+/* Called by every terminal state of a sync (success, mismatch, timeout, empty).
+   Restores the buttons and clears the lock. */
+function endSync(){
+  syncState = 'idle';
+  syncBusy = false;
+  clearTimeout(syncTimer);
+  if(bleChar){
+    btnSync.disabled = false;
+    btnLive.disabled = false;
+  }
 }
 
 let sending = false;
@@ -294,8 +322,8 @@ function handleLine(line){
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => {
       if(syncState === 'receiving'){
-        syncState = 'idle';
         setStatus('Sync timed out — try again', true);
+        endSync();
       }
     }, SYNC_TIMEOUT_MS);
     return;
@@ -307,11 +335,13 @@ function handleLine(line){
     return;
   }
   if(line === 'WIPED'){
-    syncState = 'idle';
     setStatus('Synced ✓ (Arduino cleared)', true);
+    endSync();
     return;
   }
   if(line.startsWith('NOW,')){
+    // Ignore stray NOW during a sync (shouldn't happen, but defensive)
+    if(syncState === 'receiving') return;
     const [, v, verd] = line.split(',');
     showReading(parseFloat(v), verd, 'Live reading — just now');
     return;
@@ -334,10 +364,12 @@ async function finishSync(claimedCount){
   syncState = 'idle';
   if(syncRecords.length !== claimedCount){
     setStatus(`Got ${syncRecords.length}/${claimedCount} — retry`, true);
+    endSync();
     return;
   }
   if(claimedCount === 0){
     setStatus('No new readings on device', true);
+    endSync();
     return;
   }
   await saveRecords(syncRecords);
@@ -346,6 +378,8 @@ async function finishSync(claimedCount){
   await render();
   const newest = syncRecords[syncRecords.length - 1];
   showReading(newest.volts, newest.verdict, `Newest of ${claimedCount} synced reading(s)`);
+  // NOTE: syncBusy stays true until 'WIPED' arrives; endSync() will fire there.
+  // If WIPED never arrives, the timeout above will still release the lock.
 }
 
 function setStatus(text, ok){
@@ -458,7 +492,7 @@ async function render(){
 }
 
 btnConnect.onclick = connect;
-btnSync.onclick    = () => sendCmd(CMD_GET);
+btnSync.onclick    = startSync;
 btnLive.onclick    = toggleLive;
 btnClear.onclick   = clearHistory;
 
