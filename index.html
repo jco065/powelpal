@@ -196,8 +196,7 @@ async function connect(){
     // acceptAllDevices: shows every nearby BLE device in the picker.
     // optionalServices is REQUIRED so getPrimaryService(FFE0) is allowed.
     const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true,
-      optionalServices:[BLE_SERVICE]
+      filters:[{services:[BLE_SERVICE]}]
     });
     device.addEventListener('gattserverdisconnected', onDisconnect);
     setStatus('Connecting…', false);
