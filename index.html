@@ -434,7 +434,7 @@ async function render(){
 
 btnConnect.onclick = connect;
 btnSync.onclick    = () => sendCmd(CMD_GET);
-btnLive.onclick    = () => sendCmd(CMD_LIVE);
+btnLive.onclick    = toggleLive;
 btnClear.onclick   = clearHistory;
 
 if(!navigator.bluetooth){
