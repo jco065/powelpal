@@ -212,7 +212,8 @@ async function connect(){
     logLine('[connected]');
   }catch(err){
     setStatus('Not connected', false);
-    logLine('[connect failed: ' + err.message + ']');
+    const detail = err ? ((err.name || '?') + ': ' + (err.message || String(err))) : 'no error object';
+    logLine('[connect failed: ' + detail + ']');
   }
 }
 
