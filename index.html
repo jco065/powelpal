@@ -2,12 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!-- viewport tag = scales the page correctly on iPhone AND iPad.
-     viewport-fit=cover lets the page extend into the notch area
-     (we then pad it back with safe-area insets in the CSS below) -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<!-- iOS treats the page more like an app: no gray tap-flash chrome,
-     dark status bar to match the theme -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#101418">
@@ -115,10 +110,8 @@ button:disabled{opacity:.35}
   <div id="status">Not connected</div>
 </header>
 
-<!-- ===== ALERT BANNER: appears when a bad reading comes in ===== -->
 <div id="alertBanner"></div>
 
-<!-- ===== GAUGE: latest known reading, styled like a voltmeter ===== -->
 <div class="card" id="gaugeCard">
   <svg id="gauge" viewBox="0 0 300 175"></svg>
   <div id="bigVolts">--.--</div>
@@ -126,7 +119,6 @@ button:disabled{opacity:.35}
   <div id="gaugeNote"></div>
 </div>
 
-<!-- ===== ACTION BUTTONS ===== -->
 <div class="card">
   <div class="btnRow">
     <button id="btnConnect">Connect</button>
@@ -135,14 +127,12 @@ button:disabled{opacity:.35}
   </div>
 </div>
 
-<!-- ===== HISTORY LIST (from IndexedDB, survives closing the app) ===== -->
 <div class="card" id="history">
   <h2>History</h2>
   <div id="recList"><div id="empty">No readings saved yet. Connect and tap "Get My Data".</div></div>
   <button class="danger" id="btnClear">Erase saved history (this device only)</button>
 </div>
 
-<!-- ===== RAW LOG: everything the Arduino says, for debugging ===== -->
 <div class="card">
   <h2 style="font-size:14px;color:var(--dim);letter-spacing:1.5px;
     text-transform:uppercase;margin-bottom:8px">Connection log</h2>
@@ -179,6 +169,59 @@ const VERDICTS = {
   WEAK:{color:'var(--weak)', label:'WEAK',  note:'Battery needs attention'},
   RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'}
 };
+
+/* ============================================================
+   TREND ANALYSIS
+   Looks at historical resting data to catch a dying battery 
+   before it completely fails.
+   ============================================================ */
+const REST_MIN = 6, RECENT_N = 3, MIN_SPAN_DAYS = 4;
+const DROP_WARN = 0.20;   // V slide that counts as declining
+const WEAK_V   = 12.2;    // absolute weak (~50%)
+
+const median = a => {
+  const s = [...a].sort((x,y)=>x-y), m = s.length>>1;
+  return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+};
+
+function checkBatteryTrend(rest){
+  if (rest.length < REST_MIN) return { level:'none', msg:null };
+  const recent = rest.slice(-RECENT_N), baseline = rest.slice(0,-RECENT_N);
+  const recentV = median(recent.map(r=>r.v));
+  const baseV   = median(baseline.map(r=>r.v));
+  const drop    = baseV - recentV;
+  
+  // Convert milliseconds to days
+  const spanDays = (recent.at(-1).t - baseline[0].t) / 86400000;
+  if (spanDays < MIN_SPAN_DAYS) return { level:'none', msg:null };
+
+  if (recentV <= WEAK_V)
+    return { level:'weak', drop, recentV,
+      msg:`Battery weak: resting ${recentV.toFixed(2)} V (~50% or below).` };
+  if (drop >= DROP_WARN)
+    return { level:'declining', drop, recentV,
+      msg:`Battery sliding: resting down ${drop.toFixed(2)} V (${baseV.toFixed(2)} → ${recentV.toFixed(2)} V).` };
+  return { level:'ok', drop, recentV, msg:null };
+}
+
+/* analyzeHistory()
+   Grabs the raw records, filters out charging voltages, formats 
+   the time, and feeds it to the trend analyzer. If a bad trend 
+   is found, it hijacks the alert banner to warn the user. */
+function analyzeHistory(records) {
+  const rest = records
+    .filter(r => r.verdict !== 'RUN')
+    .map(r => ({ t: r.sec * 1000, v: r.volts }))
+    .sort((a, b) => a.t - b.t); // Sort oldest to newest
+
+  const trend = checkBatteryTrend(rest);
+
+  if (trend.level === 'weak' || trend.level === 'declining') {
+    const b = document.getElementById('alertBanner');
+    b.textContent = '\u26A0 TREND ALERT: ' + trend.msg;
+    b.className = 'show ' + (trend.level === 'weak' ? 'weak' : 'low');
+  }
+}
 
 /* ============================================================
    2. DATABASE LAYER — IndexedDB
@@ -575,6 +618,10 @@ function showReading(volts, verdict, note){
    row = colored dot, volts, verdict, and when it was synced. */
 async function render(){
   const recs = await loadRecords();
+  
+  // SCAN THE HISTORY FOR TRENDS
+  analyzeHistory(recs);
+
   const list = document.getElementById('recList');
   if(recs.length === 0){
     list.innerHTML = '<div id="empty">No readings saved yet. Connect and tap "Get My Data".</div>';
