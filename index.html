@@ -202,6 +202,17 @@ async function connect(){
     setStatus('Connecting…', false);
     const server  = await device.gatt.connect();
     const service = await server.getPrimaryService(BLE_SERVICE);
+    // DEBUG: list every characteristic + what it supports, so we can see
+    // whether FFE1 wants write / write-without-response / notify.
+    try{
+      const chars = await service.getCharacteristics();
+      for(const ch of chars){
+        const p = ch.properties;
+        logLine('char ' + ch.uuid.slice(4,8) + ' [' +
+          (p.write?'W':'') + (p.writeWithoutResponse?'w':'') +
+          (p.notify?'N':'') + (p.read?'R':'') + ']');
+      }
+    }catch(e){ logLine('[char list failed: ' + e.name + ']'); }
     bleChar       = await service.getCharacteristic(BLE_CHAR);
     await bleChar.startNotifications();
     bleChar.addEventListener('characteristicvaluechanged', onNotify);
@@ -228,10 +239,16 @@ function onDisconnect(){
 
 async function sendCmd(c){
   const bytes = new TextEncoder().encode(c);
-  // Plain (acknowledged) write. Many CC2541/MLT-BT05 firmwares silently
-  // drop writeValueWithoutResponse, so we use the reliable path.
-  await bleChar.writeValue(bytes);
-  logLine('> ' + c);
+  const p = bleChar.properties;
+  // This module's UART bridge is fed by write-without-response; prefer it
+  // when the characteristic supports it, fall back to acknowledged write.
+  if(p.writeWithoutResponse){
+    await bleChar.writeValueWithoutResponse(bytes);
+    logLine('> ' + c + ' (noResp)');
+  } else {
+    await bleChar.writeValue(bytes);
+    logLine('> ' + c + ' (resp)');
+  }
 }
 
 function onNotify(event){
