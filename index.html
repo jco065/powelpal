@@ -428,4 +428,434 @@ drawGauge(null);
 openDB().then(render);
 </script>
 </body>
+</html><!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101418">
+<title>PowelPal</title>
+<style>
+:root{
+  --bg:#101418;--panel:#1a2027;--panel-edge:#2a323c;--text:#e8ecf1;--dim:#8a95a3;
+  --good:#37c871;--okay:#e8c547;--low:#f08c3a;--weak:#e5484d;--run:#4da3ff;
+  --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--text);
+  font-family:-apple-system,'Segoe UI',Roboto,sans-serif;
+  min-height:100vh;max-width:560px;margin:0 auto;
+  padding:max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+          max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  -webkit-tap-highlight-color:transparent;
+}
+header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px}
+h1{font-size:22px;letter-spacing:.5px}
+h1 span{color:var(--run)}
+#status{font-size:13px;color:var(--dim)}
+#status.on{color:var(--good)}
+.card{background:var(--panel);border:1px solid var(--panel-edge);border-radius:14px;padding:16px;margin-bottom:14px}
+#gaugeCard{text-align:center}
+#gauge{width:100%;max-width:340px;height:auto}
+#bigVolts{font-family:var(--mono);font-size:clamp(32px, 10vw, 44px);font-weight:600;line-height:1}
+#bigVerdict{font-size:15px;font-weight:600;letter-spacing:2px;margin-top:4px}
+#gaugeNote{font-size:12px;color:var(--dim);margin-top:6px}
+.btnRow{display:flex;gap:10px;flex-wrap:wrap}
+button{flex:1;min-width:130px;min-height:48px;padding:12px 10px;border:0;border-radius:10px;
+  font-size:15px;font-weight:600;color:#0d1013;background:var(--run);cursor:pointer;touch-action:manipulation}
+@media (max-width:420px){#btnConnect{flex-basis:100%}}
+button.secondary{background:var(--panel-edge);color:var(--text)}
+button:disabled{opacity:.35}
+#history h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px}
+.rec{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--panel-edge)}
+.rec:last-child{border-bottom:0}
+.dot{width:12px;height:12px;border-radius:50%;flex:none}
+.rec .v{font-family:var(--mono);font-size:18px;width:78px}
+.rec .verd{font-size:13px;font-weight:600;width:56px;letter-spacing:1px}
+.rec .meta{font-size:12px;color:var(--dim);margin-left:auto;text-align:right}
+#empty{color:var(--dim);font-size:14px;text-align:center;padding:18px 0}
+#log{font-family:var(--mono);font-size:11px;color:var(--dim);max-height:110px;overflow-y:auto;white-space:pre-wrap}
+.danger{color:var(--weak);background:none;border:1px solid var(--weak);font-size:12px;padding:8px;margin-top:10px;width:100%}
+#alertBanner{display:none;border-radius:12px;padding:14px 16px;margin-bottom:14px;font-weight:600;font-size:15px;text-align:center}
+#alertBanner.show{display:block;animation:pulse 1s ease-in-out 3}
+#alertBanner.weak{background:var(--weak);color:#fff}
+#alertBanner.low{background:var(--low);color:#0d1013}
+@keyframes pulse{50%{opacity:.55}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Powel<span>Pal</span></h1>
+  <div id="status">Not connected</div>
+</header>
+
+<div id="alertBanner"></div>
+
+<div class="card" id="gaugeCard">
+  <svg id="gauge" viewBox="0 0 300 175"></svg>
+  <div id="bigVolts">--.--</div>
+  <div id="bigVerdict" style="color:var(--dim)">NO DATA YET</div>
+  <div id="gaugeNote"></div>
+</div>
+
+<div class="card">
+  <div class="btnRow">
+    <button id="btnConnect">Connect</button>
+    <button id="btnSync" disabled>Get My Data</button>
+    <button id="btnLive" class="secondary" disabled>Live Reading</button>
+  </div>
+</div>
+
+<div class="card" id="history">
+  <h2>History</h2>
+  <div id="recList"><div id="empty">No readings saved yet. Connect and tap "Get My Data".</div></div>
+  <button class="danger" id="btnClear">Erase saved history (this device only)</button>
+</div>
+
+<div class="card">
+  <h2 style="font-size:14px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px">Connection log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+const BLE_SERVICE = 0xFFE0;
+const BLE_CHAR    = 0xFFE1;
+const CMD_GET  = 'G';
+const CMD_ACK  = 'K';
+const CMD_LIVE = 'C';
+const SYNC_TIMEOUT_MS = 8000;
+
+const VERDICTS = {
+  GOOD:{color:'var(--good)', label:'GOOD',  note:'Battery healthy'},
+  OKAY:{color:'var(--okay)', label:'OKAY',  note:'Charge is acceptable'},
+  LOW :{color:'var(--low)',  label:'LOW',   note:'Charge is getting low'},
+  WEAK:{color:'var(--weak)', label:'WEAK',  note:'Battery needs attention'},
+  RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'}
+};
+
+const REST_MIN = 6, RECENT_N = 3, MIN_SPAN_DAYS = 4;
+const DROP_WARN = 0.20;
+const WEAK_V   = 12.2;
+
+const median = a => {
+  const s = [...a].sort((x,y)=>x-y), m = s.length>>1;
+  return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
+};
+
+function checkBatteryTrend(rest){
+  if (rest.length < REST_MIN) return { level:'none', msg:null };
+  const recent = rest.slice(-RECENT_N), baseline = rest.slice(0,-RECENT_N);
+  const recentV = median(recent.map(r=>r.v));
+  const baseV   = median(baseline.map(r=>r.v));
+  const drop    = baseV - recentV;
+  const spanDays = (recent.at(-1).t - baseline[0].t) / 86400000;
+  if (spanDays < MIN_SPAN_DAYS) return { level:'none', msg:null };
+  if (recentV <= WEAK_V)
+    return { level:'weak', drop, recentV,
+      msg:`Battery weak: resting ${recentV.toFixed(2)} V (~50% or below).` };
+  if (drop >= DROP_WARN)
+    return { level:'declining', drop, recentV,
+      msg:`Battery sliding: resting down ${drop.toFixed(2)} V (${baseV.toFixed(2)} → ${recentV.toFixed(2)} V).` };
+  return { level:'ok', drop, recentV, msg:null };
+}
+
+function analyzeHistory(records) {
+  const rest = records
+    .filter(r => r.verdict !== 'RUN')
+    .map(r => ({ t: r.sec * 1000, v: r.volts }))
+    .sort((a, b) => a.t - b.t);
+  const trend = checkBatteryTrend(rest);
+  if (trend.level === 'weak' || trend.level === 'declining') {
+    const b = document.getElementById('alertBanner');
+    b.textContent = '\u26A0 TREND ALERT: ' + trend.msg;
+    b.className = 'show ' + (trend.level === 'weak' ? 'weak' : 'low');
+  }
+}
+
+let db = null;
+function openDB(){
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('powelpal', 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore('readings', {keyPath:'id', autoIncrement:true});
+    };
+    req.onsuccess = () => { db = req.result; resolve(); };
+    req.onerror   = () => reject(req.error);
+  });
+}
+function saveRecords(records){
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('readings', 'readwrite');
+    const store = tx.objectStore('readings');
+    records.forEach(r => store.add(r));
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+function loadRecords(){
+  return new Promise((resolve, reject) => {
+    const req = db.transaction('readings').objectStore('readings').getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function clearHistory(){
+  if(!confirm('Erase all saved readings from this device?')) return;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction('readings', 'readwrite');
+    tx.objectStore('readings').clear();
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  render();
+}
+
+let bleChar   = null;
+let rxBuffer  = '';
+let syncState = 'idle';
+let syncRecords = [];
+let syncTimer = null;
+
+async function connect(){
+  try{
+    setStatus('Choosing device…', false);
+    // acceptAllDevices: shows every nearby BLE device in the picker.
+    // optionalServices is REQUIRED so getPrimaryService(FFE0) is allowed.
+    const device = await navigator.bluetooth.requestDevice({
+      filters:[{services:[BLE_SERVICE]}]
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnect);
+    setStatus('Connecting…', false);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SERVICE);
+    bleChar       = await service.getCharacteristic(BLE_CHAR);
+    await bleChar.startNotifications();
+    bleChar.addEventListener('characteristicvaluechanged', onNotify);
+    setStatus('Connected', true);
+    btnSync.disabled = false;
+    btnLive.disabled = false;
+    logLine('[connected]');
+  }catch(err){
+    setStatus('Not connected', false);
+    const detail = err ? ((err.name || '?') + ': ' + (err.message || String(err))) : 'no error object';
+    logLine('[connect failed: ' + detail + ']');
+  }
+}
+
+function onDisconnect(){
+  bleChar = null;
+  syncState = 'idle';
+  clearTimeout(syncTimer);
+  btnSync.disabled = true;
+  btnLive.disabled = true;
+  setStatus('Disconnected', false);
+  logLine('[disconnected]');
+}
+
+async function sendCmd(c){
+  const bytes = new TextEncoder().encode(c);
+  try{ await bleChar.writeValueWithoutResponse(bytes); }
+  catch{ await bleChar.writeValue(bytes); }
+  logLine('> ' + c);
+}
+
+function onNotify(event){
+  rxBuffer += new TextDecoder().decode(event.target.value);
+  let nl;
+  while((nl = rxBuffer.indexOf('\n')) >= 0){
+    const line = rxBuffer.slice(0, nl).replace('\r','').trim();
+    rxBuffer = rxBuffer.slice(nl + 1);
+    if(line) handleLine(line);
+  }
+}
+
+function handleLine(line){
+  logLine('< ' + line);
+  if(line === 'BEGIN'){
+    syncState = 'receiving';
+    syncRecords = [];
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      if(syncState === 'receiving'){
+        syncState = 'idle';
+        setStatus('Sync timed out — try again', true);
+      }
+    }, SYNC_TIMEOUT_MS);
+    return;
+  }
+  if(line.startsWith('END,')){
+    clearTimeout(syncTimer);
+    const claimed = parseInt(line.slice(4), 10);
+    finishSync(claimed);
+    return;
+  }
+  if(line === 'WIPED'){
+    syncState = 'idle';
+    setStatus('Synced ✓ (Arduino cleared)', true);
+    return;
+  }
+  if(line.startsWith('NOW,')){
+    const [, v, verd] = line.split(',');
+    showReading(parseFloat(v), verd, 'Live reading — just now');
+    return;
+  }
+  if(syncState === 'receiving'){
+    const p = line.split(',');
+    if(p.length === 4){
+      syncRecords.push({
+        boot:    parseInt(p[0], 10),
+        sec:     parseInt(p[1], 10),
+        volts:   parseFloat(p[2]),
+        verdict: p[3],
+        syncedAt: Date.now()
+      });
+    }
+  }
+}
+
+async function finishSync(claimedCount){
+  syncState = 'idle';
+  if(syncRecords.length !== claimedCount){
+    setStatus(`Got ${syncRecords.length}/${claimedCount} — retry`, true);
+    return;
+  }
+  if(claimedCount === 0){
+    setStatus('No new readings on device', true);
+    return;
+  }
+  await saveRecords(syncRecords);
+  syncState = 'wiping';
+  await sendCmd(CMD_ACK);
+  await render();
+  const newest = syncRecords[syncRecords.length - 1];
+  showReading(newest.volts, newest.verdict, `Newest of ${claimedCount} synced reading(s)`);
+}
+
+function setStatus(text, ok){
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = ok ? 'on' : '';
+}
+function logLine(t){
+  const el = document.getElementById('log');
+  el.textContent += t + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function voltsToAngle(v){
+  const min = 11.5, max = 15.0;
+  const t = Math.min(1, Math.max(0, (v - min) / (max - min)));
+  return -90 + t * 180;
+}
+function drawGauge(volts){
+  const cx=150, cy=150, r=115;
+  const bands = [
+    [11.5, 12.0, 'var(--weak)'],
+    [12.0, 12.35,'var(--low)'],
+    [12.35,12.6, 'var(--okay)'],
+    [12.6, 13.2, 'var(--good)'],
+    [13.2, 15.0, 'var(--run)']
+  ];
+  const xy = (angDeg, rad=r) => {
+    const a = (180 - (angDeg + 90)) * Math.PI / 180;
+    return [cx + rad * Math.cos(a), cy - rad * Math.sin(a)];
+  };
+  let svg = '';
+  for(const [v1, v2, color] of bands){
+    const [x1, y1] = xy(voltsToAngle(v1));
+    const [x2, y2] = xy(voltsToAngle(v2));
+    svg += `<path d="M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}"
+            stroke="${color}" stroke-width="14" fill="none"
+            stroke-linecap="butt" opacity="0.9"/>`;
+  }
+  for(const v of [11.5, 12, 12.6, 13.2, 15]){
+    const [tx, ty] = xy(voltsToAngle(v), r - 26);
+    svg += `<text x="${tx}" y="${ty}" fill="var(--dim)" font-size="11"
+            text-anchor="middle" font-family="var(--mono)">${v}</text>`;
+  }
+  if(volts !== null){
+    const [nx, ny] = xy(voltsToAngle(volts), r - 12);
+    svg += `<line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}"
+            stroke="var(--text)" stroke-width="3" stroke-linecap="round"/>
+            <circle cx="${cx}" cy="${cy}" r="6" fill="var(--text)"/>`;
+  }
+  document.getElementById('gauge').innerHTML = svg;
+}
+function beep(times){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    let t = ctx.currentTime;
+    for(let i = 0; i < times; i++){
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.frequency.value = 1000;
+      osc.connect(gain); gain.connect(ctx.destination);
+      gain.gain.setValueAtTime(0.2, t);
+      osc.start(t); osc.stop(t + 0.15);
+      t += 0.3;
+    }
+  }catch(e){}
+}
+function checkAlert(verdict){
+  const b = document.getElementById('alertBanner');
+  if(verdict === 'WEAK'){
+    b.textContent = '\u26A0 Battery is WEAK — needs attention';
+    b.className = 'show weak';
+    beep(3);
+  } else if(verdict === 'LOW'){
+    b.textContent = '\u26A0 Battery charge is LOW';
+    b.className = 'show low';
+    beep(1);
+  } else {
+    b.className = '';
+  }
+}
+function showReading(volts, verdict, note){
+  const meta = VERDICTS[verdict] || {color:'var(--dim)', label:verdict, note:''};
+  drawGauge(volts);
+  document.getElementById('bigVolts').textContent = volts.toFixed(2) + ' V';
+  const bv = document.getElementById('bigVerdict');
+  bv.textContent = meta.label;
+  bv.style.color = meta.color;
+  document.getElementById('gaugeNote').textContent = note + '. ' + meta.note;
+  checkAlert(verdict);
+}
+async function render(){
+  const recs = await loadRecords();
+  analyzeHistory(recs);
+  const list = document.getElementById('recList');
+  if(recs.length === 0){
+    list.innerHTML = '<div id="empty">No readings saved yet. Connect and tap "Get My Data".</div>';
+    return;
+  }
+  recs.sort((a, b) => (b.boot - a.boot) || (b.sec - a.sec));
+  list.innerHTML = recs.map(r => {
+    const m = VERDICTS[r.verdict] || {color:'var(--dim)', label:r.verdict};
+    const when = new Date(r.syncedAt).toLocaleString([], {
+      month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    return `<div class="rec">
+      <div class="dot" style="background:${m.color}"></div>
+      <div class="v">${r.volts.toFixed(2)} V</div>
+      <div class="verd" style="color:${m.color}">${m.label}</div>
+      <div class="meta">drive #${r.boot}<br>synced ${when}</div>
+    </div>`;
+  }).join('');
+}
+
+btnConnect.onclick = connect;
+btnSync.onclick    = () => sendCmd(CMD_GET);
+btnLive.onclick    = () => sendCmd(CMD_LIVE);
+btnClear.onclick   = clearHistory;
+
+if(!navigator.bluetooth){
+  setStatus('Bluetooth not supported here', false);
+  document.getElementById('btnConnect').disabled = true;
+}
+
+drawGauge(null);
+openDB().then(render);
+</script>
+</body>
 </html>
