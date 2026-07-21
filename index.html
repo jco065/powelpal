@@ -190,11 +190,30 @@ let syncState = 'idle';
 let syncRecords = [];
 let syncTimer = null;
 
+/* Live mode: poll 'C' every LIVE_INTERVAL_MS until toggled off. */
+const LIVE_INTERVAL_MS = 10000;
+let liveTimer = null;
+
+function toggleLive(){
+  if(liveTimer){ stopLive(); return; }
+  liveTimer = setInterval(() => { if(bleChar) sendCmd(CMD_LIVE); }, LIVE_INTERVAL_MS);
+  btnLive.textContent = 'Stop Live';
+  btnLive.classList.remove('secondary');
+  sendCmd(CMD_LIVE);                 // fire one right away, don't wait 10s
+  logLine('[live: on]');
+}
+
+function stopLive(){
+  clearInterval(liveTimer);
+  liveTimer = null;
+  btnLive.textContent = 'Live Reading';
+  btnLive.classList.add('secondary');
+  logLine('[live: off]');
+}
+
 async function connect(){
   try{
     setStatus('Choosing device…', false);
-    // acceptAllDevices: shows every nearby BLE device in the picker.
-    // optionalServices is REQUIRED so getPrimaryService(FFE0) is allowed.
     const device = await navigator.bluetooth.requestDevice({
       filters:[{services:[BLE_SERVICE]}]
     });
@@ -202,8 +221,6 @@ async function connect(){
     setStatus('Connecting…', false);
     const server  = await device.gatt.connect();
     const service = await server.getPrimaryService(BLE_SERVICE);
-    // DEBUG: list every characteristic + what it supports, so we can see
-    // whether FFE1 wants write / write-without-response / notify.
     try{
       const chars = await service.getCharacteristics();
       for(const ch of chars){
@@ -231,23 +248,31 @@ function onDisconnect(){
   bleChar = null;
   syncState = 'idle';
   clearTimeout(syncTimer);
+  if(liveTimer) stopLive();
   btnSync.disabled = true;
   btnLive.disabled = true;
   setStatus('Disconnected', false);
   logLine('[disconnected]');
 }
 
+let sending = false;
 async function sendCmd(c){
-  const bytes = new TextEncoder().encode(c);
-  const p = bleChar.properties;
-  // This module's UART bridge is fed by write-without-response; prefer it
-  // when the characteristic supports it, fall back to acknowledged write.
-  if(p.writeWithoutResponse){
-    await bleChar.writeValueWithoutResponse(bytes);
-    logLine('> ' + c + ' (noResp)');
-  } else {
-    await bleChar.writeValue(bytes);
-    logLine('> ' + c + ' (resp)');
+  if(sending){ logLine('[busy, dropped ' + c + ']'); return; }
+  sending = true;
+  try{
+    const bytes = new TextEncoder().encode(c);
+    const p = bleChar.properties;
+    if(p.writeWithoutResponse){
+      await bleChar.writeValueWithoutResponse(bytes);
+      logLine('> ' + c + ' (noResp)');
+    } else {
+      await bleChar.writeValue(bytes);
+      logLine('> ' + c + ' (resp)');
+    }
+  }catch(err){
+    logLine('[send failed: ' + err.name + ']');
+  }finally{
+    sending = false;
   }
 }
 
