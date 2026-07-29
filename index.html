@@ -39,7 +39,7 @@ button{flex:1;min-width:130px;min-height:48px;padding:12px 10px;border:0;border-
 @media (max-width:420px){#btnConnect{flex-basis:100%}}
 button.secondary{background:var(--panel-edge);color:var(--text)}
 button:disabled{opacity:.35}
-#history h2{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px}
+#history h2,#logHead{font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px}
 .rec{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--panel-edge)}
 .rec:last-child{border-bottom:0}
 .dot{width:12px;height:12px;border-radius:50%;flex:none}
@@ -81,13 +81,13 @@ button:disabled{opacity:.35}
 </div>
 
 <div class="card" id="history">
-  <h2>History</h2>
+  <h2 id="histHead">History</h2>
   <div id="recList"><div id="empty">No readings saved yet. Connect and tap "Get My Data".</div></div>
   <button class="danger" id="btnClear">Erase saved history (this device only)</button>
 </div>
 
 <div class="card">
-  <h2 style="font-size:14px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px">Connection log</h2>
+  <h2 id="logHead">Connection log</h2>
   <div id="log"></div>
 </div>
 
@@ -96,7 +96,8 @@ const BLE_SERVICE = 0xFFE0;
 const BLE_CHAR    = 0xFFE1;
 const CMD_GET  = 'G';
 const CMD_ACK  = 'K';
-const CMD_LIVE = 'C';
+const CMD_NOW  = 'C';
+const CMD_LIVE = 'L';          // toggles 1 Hz streaming on the sketch
 const SYNC_TIMEOUT_MS = 8000;
 
 const VERDICTS = {
@@ -146,6 +147,7 @@ function analyzeHistory(records) {
   }
 }
 
+/* ---------------- IndexedDB ---------------- */
 let db = null;
 function openDB(){
   return new Promise((resolve, reject) => {
@@ -173,6 +175,9 @@ function loadRecords(){
     req.onerror   = () => reject(req.error);
   });
 }
+
+/* Clear history now also resets the gauge card and banner so no stale
+   reading/count survives the wipe. */
 async function clearHistory(){
   if(!confirm('Erase all saved readings from this device?')) return;
   await new Promise((resolve, reject) => {
@@ -181,42 +186,48 @@ async function clearHistory(){
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
   });
-  render();
+  resetGaugeUI();
+  await render();
 }
 
+function resetGaugeUI(){
+  drawGauge(null);
+  document.getElementById('bigVolts').textContent = '--.--';
+  const bv = document.getElementById('bigVerdict');
+  bv.textContent = 'NO DATA YET';
+  bv.style.color = 'var(--dim)';
+  document.getElementById('gaugeNote').textContent = '';
+  document.getElementById('alertBanner').className = '';
+  lastAlertVerdict = null;
+}
+
+/* ---------------- BLE state ---------------- */
 let bleChar   = null;
 let rxBuffer  = '';
 let syncState = 'idle';
 let syncRecords = [];
 let syncTimer = null;
 let syncBusy  = false;   // full-sync lock: covers G, all row lines, K, WIPED
+let liveOn    = false;   // sketch is streaming L, lines
 
-/* Live mode: poll 'C' every LIVE_INTERVAL_MS until toggled off. */
-const LIVE_INTERVAL_MS = 10000;
-let liveTimer = null;
+function setLiveUI(on){
+  liveOn = on;
+  btnLive.textContent = on ? 'Stop Live' : 'Live Reading';
+  btnLive.classList.toggle('secondary', !on);
+  // Rule: no data sync while live reading is on
+  if(bleChar && !syncBusy) btnSync.disabled = on;
+}
 
 function toggleLive(){
   if(syncBusy){ logLine('[sync running — live disabled]'); return; }
-  if(liveTimer){ stopLive(); return; }
-  liveTimer = setInterval(() => {
-    // extra safety: if a sync starts up mid-interval, don't fire C into it
-    if(bleChar && !syncBusy) sendCmd(CMD_LIVE);
-  }, LIVE_INTERVAL_MS);
-  btnLive.textContent = 'Stop Live';
-  btnLive.classList.remove('secondary');
-  sendCmd(CMD_LIVE);                 // fire one right away, don't wait 10s
-  logLine('[live: on]');
-}
-
-function stopLive(){
-  clearInterval(liveTimer);
-  liveTimer = null;
-  btnLive.textContent = 'Live Reading';
-  btnLive.classList.add('secondary');
-  logLine('[live: off]');
+  if(!bleChar) return;
+  sendCmd(CMD_LIVE);        // sketch toggles and answers LIVE,1 / LIVE,0
+  setLiveUI(!liveOn);       // optimistic; the ack reconciles if they disagree
+  logLine(liveOn ? '[live: on]' : '[live: off]');
 }
 
 async function connect(){
+  btnConnect.disabled = true;               // no double-tap connect
   try{
     setStatus('Choosing device…', false);
     const device = await navigator.bluetooth.requestDevice({
@@ -242,8 +253,10 @@ async function connect(){
     btnSync.disabled = false;
     btnLive.disabled = false;
     logLine('[connected]');
+    // btnConnect stays disabled while connected
   }catch(err){
     setStatus('Not connected', false);
+    btnConnect.disabled = false;
     const detail = err ? ((err.name || '?') + ': ' + (err.message || String(err))) : 'no error object';
     logLine('[connect failed: ' + detail + ']');
   }
@@ -254,31 +267,31 @@ function onDisconnect(){
   syncState = 'idle';
   syncBusy = false;
   clearTimeout(syncTimer);
-  if(liveTimer) stopLive();
+  setLiveUI(false);
   btnSync.disabled = true;
   btnLive.disabled = true;
+  btnConnect.disabled = false;
   setStatus('Disconnected', false);
   logLine('[disconnected]');
 }
 
-/* Starts a sync. Refuses re-entry, kills any live polling, locks buttons. */
+/* Starts a sync. Refuses re-entry, refuses while live mode is on. */
 async function startSync(){
   if(syncBusy){ logLine('[sync already running]'); return; }
+  if(liveOn){ logLine('[stop live reading first]'); return; }
   syncBusy = true;
-  if(liveTimer) stopLive();          // don't let 'C' interleave with a dump
   btnSync.disabled = true;
   btnLive.disabled = true;
   await sendCmd(CMD_GET);
 }
 
-/* Called by every terminal state of a sync (success, mismatch, timeout, empty).
-   Restores the buttons and clears the lock. */
+/* Every terminal state of a sync lands here. */
 function endSync(){
   syncState = 'idle';
   syncBusy = false;
   clearTimeout(syncTimer);
   if(bleChar){
-    btnSync.disabled = false;
+    btnSync.disabled = liveOn;
     btnLive.disabled = false;
   }
 }
@@ -339,8 +352,19 @@ function handleLine(line){
     endSync();
     return;
   }
+  if(line.startsWith('LIVE,')){
+    // sketch's authoritative live-mode state (covers its auto-timeout too)
+    setLiveUI(line.charAt(5) === '1');
+    return;
+  }
+  if(line.startsWith('L,')){
+    // 1 Hz live stream — display only, never stored
+    if(syncState === 'receiving') return;
+    const p = line.split(',');
+    showReading(parseFloat(p[1]), p[2] || '', 'Live reading');
+    return;
+  }
   if(line.startsWith('NOW,')){
-    // Ignore stray NOW during a sync (shouldn't happen, but defensive)
     if(syncState === 'receiving') return;
     const [, v, verd] = line.split(',');
     showReading(parseFloat(v), verd, 'Live reading — just now');
@@ -348,12 +372,13 @@ function handleLine(line){
   }
   if(syncState === 'receiving'){
     const p = line.split(',');
-    if(p.length === 4){
+    if(p.length >= 4){
       syncRecords.push({
         boot:    parseInt(p[0], 10),
         sec:     parseInt(p[1], 10),
         volts:   parseFloat(p[2]),
         verdict: p[3],
+        driveMin: p.length >= 5 ? parseInt(p[4], 10) : null,
         syncedAt: Date.now()
       });
     }
@@ -378,10 +403,11 @@ async function finishSync(claimedCount){
   await render();
   const newest = syncRecords[syncRecords.length - 1];
   showReading(newest.volts, newest.verdict, `Newest of ${claimedCount} synced reading(s)`);
-  // NOTE: syncBusy stays true until 'WIPED' arrives; endSync() will fire there.
-  // If WIPED never arrives, the timeout above will still release the lock.
+  // syncBusy stays true until 'WIPED' arrives; endSync() fires there.
+  // If WIPED never arrives, the timeout above still releases the lock.
 }
 
+/* ---------------- UI ---------------- */
 function setStatus(text, ok){
   const el = document.getElementById('status');
   el.textContent = text;
@@ -445,21 +471,27 @@ function beep(times){
     }
   }catch(e){}
 }
+
+/* Alert beeps only fire on a verdict *transition* — a 1 Hz live stream
+   sitting at WEAK would otherwise beep every second. */
+let lastAlertVerdict = null;
 function checkAlert(verdict){
   const b = document.getElementById('alertBanner');
   if(verdict === 'WEAK'){
     b.textContent = '\u26A0 Battery is WEAK — needs attention';
     b.className = 'show weak';
-    beep(3);
+    if(lastAlertVerdict !== 'WEAK') beep(3);
   } else if(verdict === 'LOW'){
     b.textContent = '\u26A0 Battery charge is LOW';
     b.className = 'show low';
-    beep(1);
+    if(lastAlertVerdict !== 'LOW') beep(1);
   } else {
     b.className = '';
   }
+  lastAlertVerdict = verdict;
 }
 function showReading(volts, verdict, note){
+  if(!isFinite(volts)) return;                       // garbage line — don't break the gauge
   const meta = VERDICTS[verdict] || {color:'var(--dim)', label:verdict, note:''};
   drawGauge(volts);
   document.getElementById('bigVolts').textContent = volts.toFixed(2) + ' V';
@@ -473,28 +505,45 @@ async function render(){
   const recs = await loadRecords();
   analyzeHistory(recs);
   const list = document.getElementById('recList');
+  const head = document.getElementById('histHead');
   if(recs.length === 0){
+    head.textContent = 'History';
     list.innerHTML = '<div id="empty">No readings saved yet. Connect and tap "Get My Data".</div>';
     return;
   }
   recs.sort((a, b) => (b.boot - a.boot) || (b.sec - a.sec));
+  const lastSync = new Date(Math.max(...recs.map(r => r.syncedAt)))
+    .toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+  head.textContent = `History — ${recs.length} reading${recs.length !== 1 ? 's' : ''} · last sync ${lastSync}`;
   list.innerHTML = recs.map(r => {
     const m = VERDICTS[r.verdict] || {color:'var(--dim)', label:r.verdict};
     const when = new Date(r.syncedAt).toLocaleString([], {
       month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    const drove = (r.driveMin != null && !isNaN(r.driveMin)) ? ` · drove ${r.driveMin} min` : '';
     return `<div class="rec">
       <div class="dot" style="background:${m.color}"></div>
       <div class="v">${r.volts.toFixed(2)} V</div>
       <div class="verd" style="color:${m.color}">${m.label}</div>
-      <div class="meta">drive #${r.boot}<br>synced ${when}</div>
+      <div class="meta">drive #${r.boot}${drove}<br>synced ${when}</div>
     </div>`;
   }).join('');
 }
 
-btnConnect.onclick = connect;
-btnSync.onclick    = startSync;
-btnLive.onclick    = toggleLive;
-btnClear.onclick   = clearHistory;
+/* All buttons get a tap debounce so spamming can't interleave commands. */
+function debounced(fn, ms = 450){
+  let last = 0;
+  return (...a) => {
+    const now = Date.now();
+    if(now - last < ms) return;
+    last = now;
+    fn(...a);
+  };
+}
+
+btnConnect.onclick = debounced(connect);
+btnSync.onclick    = debounced(startSync);
+btnLive.onclick    = debounced(toggleLive);
+btnClear.onclick   = debounced(clearHistory);
 
 if(!navigator.bluetooth){
   setStatus('Bluetooth not supported here', false);
