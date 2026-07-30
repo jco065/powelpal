@@ -92,6 +92,16 @@ button:disabled{opacity:.35}
 </div>
 
 <script>
+/* ============================================================
+   BLE line formats — must match the Arduino sketch EXACTLY:
+     BEGIN ... rows ... END,n   response to G (dump)
+     WIPED                      response to K (wipe)
+     LIVE,1 / LIVE,0            live mode on/off ack
+     L,<seq>,<volts>,<verdict>  1 Hz live stream  (seq = reading counter)
+     NOW,<volts>,<verdict>      response to C (single reading)
+   ERR can appear in the verdict slot of L, and NOW, lines when
+   the sketch's sensor sanity check fails. Never in synced rows.
+   ============================================================ */
 const BLE_SERVICE = 0xFFE0;
 const BLE_CHAR    = 0xFFE1;
 const CMD_GET  = 'G';
@@ -105,7 +115,8 @@ const VERDICTS = {
   OKAY:{color:'var(--okay)', label:'OKAY',  note:'Charge is acceptable'},
   LOW :{color:'var(--low)',  label:'LOW',   note:'Charge is getting low'},
   WEAK:{color:'var(--weak)', label:'WEAK',  note:'Battery needs attention'},
-  RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'}
+  RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'},
+  ERR :{color:'var(--dim)',  label:'ERR',   note:'Sensor reading out of range — check connections'}
 };
 
 const REST_MIN = 6, RECENT_N = 3, MIN_SPAN_DAYS = 4;
@@ -358,10 +369,10 @@ function handleLine(line){
     return;
   }
   if(line.startsWith('L,')){
-    // 1 Hz live stream — display only, never stored
+    // 1 Hz live stream: L,<seq>,<volts>,<verdict> — display only, never stored
     if(syncState === 'receiving') return;
     const p = line.split(',');
-    showReading(parseFloat(p[1]), p[2] || '', 'Live reading');
+    showReading(parseFloat(p[2]), p[3] || '', 'Live reading #' + p[1]);
     return;
   }
   if(line.startsWith('NOW,')){
@@ -493,7 +504,7 @@ function checkAlert(verdict){
 function showReading(volts, verdict, note){
   if(!isFinite(volts)) return;                       // garbage line — don't break the gauge
   const meta = VERDICTS[verdict] || {color:'var(--dim)', label:verdict, note:''};
-  drawGauge(volts);
+  drawGauge(verdict === 'ERR' ? null : volts);       // no needle on invalid readings
   document.getElementById('bigVolts').textContent = volts.toFixed(2) + ' V';
   const bv = document.getElementById('bigVerdict');
   bv.textContent = meta.label;
