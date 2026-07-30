@@ -57,21 +57,21 @@ button:disabled{opacity:.35}
 </style>
 </head>
 <body>
-
+ 
 <header>
   <h1>Powel<span>Pal</span></h1>
   <div id="status">Not connected</div>
 </header>
-
+ 
 <div id="alertBanner"></div>
-
+ 
 <div class="card" id="gaugeCard">
   <svg id="gauge" viewBox="0 0 300 175"></svg>
   <div id="bigVolts">--.--</div>
   <div id="bigVerdict" style="color:var(--dim)">NO DATA YET</div>
   <div id="gaugeNote"></div>
 </div>
-
+ 
 <div class="card">
   <div class="btnRow">
     <button id="btnConnect">Connect</button>
@@ -79,18 +79,18 @@ button:disabled{opacity:.35}
     <button id="btnLive" class="secondary" disabled>Live Reading</button>
   </div>
 </div>
-
+ 
 <div class="card" id="history">
   <h2 id="histHead">History</h2>
   <div id="recList"><div id="empty">No readings saved yet. Connect and tap "Get My Data".</div></div>
   <button class="danger" id="btnClear">Erase saved history (this device only)</button>
 </div>
-
+ 
 <div class="card">
   <h2 id="logHead">Connection log</h2>
   <div id="log"></div>
 </div>
-
+ 
 <script>
 /* ============================================================
    BLE line formats — must match the Arduino sketch EXACTLY:
@@ -109,7 +109,7 @@ const CMD_ACK  = 'K';
 const CMD_NOW  = 'C';
 const CMD_LIVE = 'L';          // toggles 1 Hz streaming on the sketch
 const SYNC_TIMEOUT_MS = 8000;
-
+ 
 const VERDICTS = {
   GOOD:{color:'var(--good)', label:'GOOD',  note:'Battery healthy'},
   OKAY:{color:'var(--okay)', label:'OKAY',  note:'Charge is acceptable'},
@@ -118,16 +118,16 @@ const VERDICTS = {
   RUN :{color:'var(--run)',  label:'RUN',   note:'Engine was running — charging voltage, not a resting reading'},
   ERR :{color:'var(--dim)',  label:'ERR',   note:'Sensor reading out of range — check connections'}
 };
-
+ 
 const REST_MIN = 6, RECENT_N = 3, MIN_SPAN_DAYS = 4;
 const DROP_WARN = 0.20;
 const WEAK_V   = 12.2;
-
+ 
 const median = a => {
   const s = [...a].sort((x,y)=>x-y), m = s.length>>1;
   return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
 };
-
+ 
 function checkBatteryTrend(rest){
   if (rest.length < REST_MIN) return { level:'none', msg:null };
   const recent = rest.slice(-RECENT_N), baseline = rest.slice(0,-RECENT_N);
@@ -144,7 +144,7 @@ function checkBatteryTrend(rest){
       msg:`Battery sliding: resting down ${drop.toFixed(2)} V (${baseV.toFixed(2)} → ${recentV.toFixed(2)} V).` };
   return { level:'ok', drop, recentV, msg:null };
 }
-
+ 
 function analyzeHistory(records) {
   const rest = records
     .filter(r => r.verdict !== 'RUN')
@@ -157,7 +157,7 @@ function analyzeHistory(records) {
     b.className = 'show ' + (trend.level === 'weak' ? 'weak' : 'low');
   }
 }
-
+ 
 /* ---------------- IndexedDB ---------------- */
 let db = null;
 function openDB(){
@@ -186,7 +186,7 @@ function loadRecords(){
     req.onerror   = () => reject(req.error);
   });
 }
-
+ 
 /* Clear history now also resets the gauge card and banner so no stale
    reading/count survives the wipe. */
 async function clearHistory(){
@@ -200,7 +200,7 @@ async function clearHistory(){
   resetGaugeUI();
   await render();
 }
-
+ 
 function resetGaugeUI(){
   drawGauge(null);
   document.getElementById('bigVolts').textContent = '--.--';
@@ -211,7 +211,7 @@ function resetGaugeUI(){
   document.getElementById('alertBanner').className = '';
   lastAlertVerdict = null;
 }
-
+ 
 /* ---------------- BLE state ---------------- */
 let bleChar   = null;
 let rxBuffer  = '';
@@ -220,7 +220,7 @@ let syncRecords = [];
 let syncTimer = null;
 let syncBusy  = false;   // full-sync lock: covers G, all row lines, K, WIPED
 let liveOn    = false;   // sketch is streaming L, lines
-
+ 
 function setLiveUI(on){
   liveOn = on;
   btnLive.textContent = on ? 'Stop Live' : 'Live Reading';
@@ -228,7 +228,7 @@ function setLiveUI(on){
   // Rule: no data sync while live reading is on
   if(bleChar && !syncBusy) btnSync.disabled = on;
 }
-
+ 
 function toggleLive(){
   if(syncBusy){ logLine('[sync running — live disabled]'); return; }
   if(!bleChar) return;
@@ -236,7 +236,7 @@ function toggleLive(){
   setLiveUI(!liveOn);       // optimistic; the ack reconciles if they disagree
   logLine(liveOn ? '[live: on]' : '[live: off]');
 }
-
+ 
 async function connect(){
   btnConnect.disabled = true;               // no double-tap connect
   try{
@@ -272,7 +272,7 @@ async function connect(){
     logLine('[connect failed: ' + detail + ']');
   }
 }
-
+ 
 function onDisconnect(){
   bleChar = null;
   syncState = 'idle';
@@ -285,7 +285,7 @@ function onDisconnect(){
   setStatus('Disconnected', false);
   logLine('[disconnected]');
 }
-
+ 
 /* Starts a sync. Refuses re-entry, refuses while live mode is on. */
 async function startSync(){
   if(syncBusy){ logLine('[sync already running]'); return; }
@@ -295,7 +295,7 @@ async function startSync(){
   btnLive.disabled = true;
   await sendCmd(CMD_GET);
 }
-
+ 
 /* Every terminal state of a sync lands here. */
 function endSync(){
   syncState = 'idle';
@@ -306,7 +306,7 @@ function endSync(){
     btnLive.disabled = false;
   }
 }
-
+ 
 let sending = false;
 async function sendCmd(c){
   if(sending){ logLine('[busy, dropped ' + c + ']'); return; }
@@ -327,7 +327,7 @@ async function sendCmd(c){
     sending = false;
   }
 }
-
+ 
 function onNotify(event){
   rxBuffer += new TextDecoder().decode(event.target.value);
   let nl;
@@ -337,7 +337,7 @@ function onNotify(event){
     if(line) handleLine(line);
   }
 }
-
+ 
 function handleLine(line){
   logLine('< ' + line);
   if(line === 'BEGIN'){
@@ -395,7 +395,7 @@ function handleLine(line){
     }
   }
 }
-
+ 
 async function finishSync(claimedCount){
   syncState = 'idle';
   if(syncRecords.length !== claimedCount){
@@ -417,7 +417,7 @@ async function finishSync(claimedCount){
   // syncBusy stays true until 'WIPED' arrives; endSync() fires there.
   // If WIPED never arrives, the timeout above still releases the lock.
 }
-
+ 
 /* ---------------- UI ---------------- */
 function setStatus(text, ok){
   const el = document.getElementById('status');
@@ -482,7 +482,7 @@ function beep(times){
     }
   }catch(e){}
 }
-
+ 
 /* Alert beeps only fire on a verdict *transition* — a 1 Hz live stream
    sitting at WEAK would otherwise beep every second. */
 let lastAlertVerdict = null;
@@ -539,7 +539,7 @@ async function render(){
     </div>`;
   }).join('');
 }
-
+ 
 /* All buttons get a tap debounce so spamming can't interleave commands. */
 function debounced(fn, ms = 450){
   let last = 0;
@@ -550,19 +550,20 @@ function debounced(fn, ms = 450){
     fn(...a);
   };
 }
-
+ 
 btnConnect.onclick = debounced(connect);
 btnSync.onclick    = debounced(startSync);
 btnLive.onclick    = debounced(toggleLive);
 btnClear.onclick   = debounced(clearHistory);
-
+ 
 if(!navigator.bluetooth){
   setStatus('Bluetooth not supported here', false);
   document.getElementById('btnConnect').disabled = true;
 }
-
+ 
 drawGauge(null);
 openDB().then(render);
 </script>
 </body>
 </html>
+ 
