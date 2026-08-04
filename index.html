@@ -131,6 +131,20 @@ const median = a => {
   return s.length%2 ? s[m] : (s[m-1]+s[m])/2;
 };
 
+/* Same verdict thresholds as the Arduino sketch — used to classify
+   the browser-side averaged reading. */
+const classifyV = v =>
+  v > 13.2 ? 'RUN' : v >= 12.6 ? 'GOOD' : v >= 12.35 ? 'OKAY' :
+  v >= 12.0 ? 'LOW' : 'WEAK';
+
+/* Trimmed mean: drop the single lowest and highest sample, average the
+   rest. One spurious spike or dip can't drag the result. */
+const trimmedMean = a => {
+  if(a.length <= 2) return a.reduce((s,x)=>s+x,0) / a.length;
+  const s = [...a].sort((x,y)=>x-y).slice(1,-1);
+  return s.reduce((sum,x)=>sum+x,0) / s.length;
+};
+
 function checkBatteryTrend(rest){
   if (rest.length < REST_MIN) return { level:'none', msg:null };
   const recent = rest.slice(-RECENT_N), baseline = rest.slice(0,-RECENT_N);
@@ -241,6 +255,15 @@ let syncTimer = null;
 let syncBusy  = false;   // full-sync lock: covers G, all row lines, K, WIPED
 let liveOn    = false;   // sketch is streaming L, lines
 
+/* --- Settle-and-average ---------------------------------------
+   Tapping "Live Reading" now collects SETTLE_TARGET valid samples
+   (~10 s at the sketch's 1 Hz), shows progress as they arrive,
+   then locks in ONE trimmed-mean reading and auto-stops the
+   stream. ERR lines don't count toward the target. ------------- */
+const SETTLE_TARGET = 10;
+let settleActive  = false;
+let settleSamples = [];
+
 function setLiveUI(on){
   liveOn = on;
   btnLive.textContent = on ? 'Stop Live' : 'Live Reading';
@@ -254,7 +277,9 @@ function toggleLive(){
   if(!bleChar) return;
   sendCmd(CMD_LIVE);        // sketch toggles and answers LIVE,1 / LIVE,0
   setLiveUI(!liveOn);       // optimistic; the ack reconciles if they disagree
-  logLine(liveOn ? '[live: on]' : '[live: off]');
+  settleActive  = liveOn;   // arm settle only when we just turned live ON
+  settleSamples = [];
+  logLine(liveOn ? '[live: on — settling ' + SETTLE_TARGET + ' samples]' : '[live: off]');
 }
 
 async function connect(){
@@ -300,6 +325,8 @@ function onDisconnect(){
   syncBusy = false;
   clearTimeout(syncTimer);
   setLiveUI(false);
+  settleActive = false;
+  settleSamples = [];
   btnSync.disabled = true;
   btnLive.disabled = true;
   btnFactory.disabled = true;
@@ -391,14 +418,41 @@ function handleLine(line){
   }
   if(line.startsWith('LIVE,')){
     // sketch's authoritative live-mode state (covers its auto-timeout too)
-    setLiveUI(line.charAt(5) === '1');
+    const on = line.charAt(5) === '1';
+    setLiveUI(on);
+    if(!on && settleActive){
+      // stream died (timeout/stop) before we collected enough — cancel
+      settleActive = false;
+      settleSamples = [];
+      logLine('[settle cancelled — live stream stopped]');
+    }
     return;
   }
   if(line.startsWith('L,')){
     // 1 Hz live stream: L,<seq>,<volts>,<verdict> — display only, never stored
     if(syncState === 'receiving') return;
     const p = line.split(',');
-    showReading(parseFloat(p[2]), p[3] || '', 'Live reading #' + p[1]);
+    const v = parseFloat(p[2]), verd = p[3] || '';
+
+    if(!settleActive){
+      showReading(v, verd, 'Live reading #' + p[1]);
+      return;
+    }
+
+    // Settle mode: collect valid samples, show progress, then lock in.
+    if(verd !== 'ERR' && isFinite(v)) settleSamples.push(v);
+    if(settleSamples.length < SETTLE_TARGET){
+      showReading(v, verd,
+        'Settling\u2026 ' + settleSamples.length + '/' + SETTLE_TARGET + ' samples');
+      return;
+    }
+    const avg = trimmedMean(settleSamples);
+    settleActive  = false;
+    settleSamples = [];
+    if(liveOn) sendCmd(CMD_LIVE);     // auto-stop the stream; LIVE,0 ack reconciles
+    setLiveUI(false);
+    showReading(avg, classifyV(avg),
+      'Averaged reading \u2014 ' + SETTLE_TARGET + ' samples over ~10 s');
     return;
   }
   if(line.startsWith('NOW,')){
