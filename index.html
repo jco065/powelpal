@@ -446,7 +446,7 @@ function handleLine(line){
         'Settling\u2026 ' + settleSamples.length + '/' + SETTLE_TARGET + ' samples');
       return;
     }
-    const avg = trimmedMean(settleSamples);
+    const avg = median(settleSamples);
     settleActive  = false;
     settleSamples = [];
     if(liveOn) sendCmd(CMD_LIVE);     // auto-stop the stream; LIVE,0 ack reconciles
